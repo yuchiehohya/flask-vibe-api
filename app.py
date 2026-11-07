@@ -1,83 +1,68 @@
+import os
 from datetime import datetime, timezone
 from typing import Any
 
-from flask import Flask, jsonify, request
+from dotenv import load_dotenv
+from flask import Flask, jsonify
+from sqlalchemy import text
+
+from extensions import db
 
 
-app = Flask(__name__)
-app.json.ensure_ascii = False
-
-tasks: list[dict[str, Any]] = [
-    {
-        "id": 1,
-        "title": "完成 Flask API",
-        "description": "建立任務管理系統的基本端點。",
-    },
-    {
-        "id": 2,
-        "title": "撰寫 API 測試",
-        "description": "驗證各端點的成功與錯誤回應。",
-    },
-]
+def response(code: int, message: str, data: Any = None):
+    return jsonify({"code": code, "message": message, "data": data}), code
 
 
-def response(
-    status: str, message: str, data: Any, status_code: int
-):
-    return jsonify({"status": status, "message": message, "data": data}), status_code
+def create_app(test_config: dict[str, Any] | None = None) -> Flask:
+    app = Flask(__name__)
+    app.json.ensure_ascii = False
+
+    load_dotenv()
+
+    if test_config is not None:
+        app.config.update(test_config)
+    else:
+        database_url = os.environ.get("DATABASE_URL")
+        if not database_url:
+            raise RuntimeError(
+                "未設定環境變數 DATABASE_URL。請在 .env 或環境變數中設定 PostgreSQL 連線字串。"
+            )
+        if database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql://", 1)
+        app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+
+    app.config.setdefault("SQLALCHEMY_TRACK_MODIFICATIONS", False)
+    db.init_app(app)
+
+    @app.get("/api/health")
+    def health():
+        return response(
+            200,
+            "伺服器運作正常，測試正常可以進行其他任務。",
+            {
+                "status": "ok",
+                "time": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    @app.get("/api/health/db")
+    def health_db():
+        try:
+            db.session.execute(text("SELECT 1"))
+            return response(200, "資料庫連線正常", {"status": "ok"})
+        except Exception as error:
+            db.session.rollback()
+            app.logger.error("資料庫連線失敗: %s", error)
+            return response(500, "資料庫暫時連不上", None)
+
+    @app.errorhandler(404)
+    def handle_not_found(_error):
+        return response(404, "找不到這一筆", None)
+
+    return app
 
 
-@app.get("/api/health")
-def health():
-    return response(
-        "success",
-        "Server is running",
-        {"status": "running", "timestamp": datetime.now(timezone.utc).isoformat()},
-        200,
-    )
-
-
-@app.get("/api/tasks")
-def get_tasks():
-    return response("success", "Tasks retrieved successfully", tasks, 200)
-
-
-@app.post("/api/tasks")
-def create_task():
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return response("error", "Request body must be valid JSON", None, 400)
-
-    title = payload.get("title")
-    if not isinstance(title, str) or not title.strip():
-        return response("error", "The title field is required", None, 400)
-
-    description = payload.get("description", "")
-    if description is None:
-        description = ""
-
-    task = {
-        "id": max((task["id"] for task in tasks), default=0) + 1,
-        "title": title.strip(),
-        "description": description,
-    }
-    tasks.append(task)
-
-    return response("success", "Task created successfully", task, 201)
-
-
-@app.get("/api/tasks/<int:task_id>")
-def get_task(task_id: int):
-    task = next((task for task in tasks if task["id"] == task_id), None)
-    if task is None:
-        return response("error", "Task not found", None, 404)
-
-    return response("success", "Task retrieved successfully", task, 200)
-
-
-@app.errorhandler(404)
-def handle_not_found(_error):
-    return response("error", "Resource not found", None, 404)
+app = create_app()
 
 
 if __name__ == "__main__":
